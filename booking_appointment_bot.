@@ -1,0 +1,188 @@
+
+
+# бот вк для записи на услуги Консультация", "Массаж", "Стрижка", "Маникюр",записывакт номер имя дата и время
+
+import csv ,os
+from datetime import datetime
+import vk_api
+from vk_api.keyboard import VkKeyboard, VkKeyboardColor
+from vk_api.utils import get_random_id
+from vk_api.longpoll import VkLongPoll, VkEventType
+from vk_api.exceptions import ApiError  # Важно для правильной обработки ошибок VK
+
+# --- НАСТРОЙКА ---
+VK_TOKEN = "vk1.a.vu5xFY-QoQA9zpAcz1cIQcXtU0tf1Ehlc6VQ7hU3jKimx9yJ1BnDTa5C1A8iucygVezZYgNSfMDvqYfg_-XJPc0HxS51gtAZSfoLKVqTq9O45udNPl2xnXrzBF2NLu5tsghAIm0JngqMiO56PldVZ2xSPdaAjk6UhocMSc4Qc7s-I_oa3wwpwNhFa6uG3r-575eitYfFanHRv2g2aOen2g"  # Вставь сюда токен сообщества
+CSV_FILE = "leads.csv"
+
+FIELDS = ["timestamp", "user_id", "name", "phone", "service", "date_time", "message"]
+
+STATE_START = "start"
+STATE_NAME = "name"
+STATE_PHONE = "phone"
+STATE_SERVICE = "service"
+STATE_DATE = "date"
+
+
+def get_group_id_from_token(token):
+    vk_session = vk_api.VkApi(token=token)
+    api = vk_session.get_api()
+    try:
+        group = api.groups.getById()[0]
+        return group["id"]
+    except ApiError as e:
+        print(f"Не удалось получить ID группы. Ошибка VK: {e}")
+        raise
+
+
+def init_csv():
+    if not os.path.exists(CSV_FILE):
+        with open(CSV_FILE, "w", newline="", encoding="utf-8") as f:
+            writer = csv.DictWriter(f, fieldnames=FIELDS)
+            writer.writeheader()
+
+
+def save_lead(user_id, data):
+    row = {
+        "timestamp": datetime.now().isoformat(),
+        "user_id": user_id,
+        "name": data.get("name", ""),
+        "phone": data.get("phone", ""),
+        "service": data.get("service", ""),
+        "date_time": data.get("date_time", ""),
+        "message": data.get("message", ""),
+    }
+    try:
+        with open(CSV_FILE, "a", newline="", encoding="utf-8") as f:
+            writer = csv.DictWriter(f, fieldnames=FIELDS)
+            writer.writerow(row)
+    except Exception as e:
+        print(f"Критическая ошибка записи в CSV: {e}")
+
+
+def make_keyboard_start():
+    keyboard = VkKeyboard(one_time=False)
+    keyboard.add_button("Записаться на услугу", color=VkKeyboardColor.PRIMARY)
+    return keyboard.get_keyboard()
+
+
+def make_keyboard_services():
+    keyboard = VkKeyboard(one_time=True)
+    services = ["Консультация", "Массаж", "Стрижка", "Маникюр", "Другое"]
+    for s in services:
+        keyboard.add_button(s, color=VkKeyboardColor.SECONDARY)
+        if s != services[-1]:
+            keyboard.add_line()
+    return keyboard.get_keyboard()
+
+
+class LeadBot:
+    def __init__(self, token):
+        self.vk = vk_api.VkApi(token=token)
+        self.api = self.vk.get_api()
+        self.group_id = get_group_id_from_token(token)
+        self.user_states = {}
+        self.user_data = {}
+
+    def send_message(self, user_id, text, keyboard=None):
+        try:
+            self.api.messages.send(
+                user_id=user_id,
+                message=text,
+                random_id=get_random_id(),
+                keyboard=keyboard,
+            )
+        except ApiError as e:
+            # Вот тут мы увидим реальный код ошибки VK (например, 901 - нельзя писать пользователю)
+            print(
+                f"[API ERROR] Не удалось отправить сообщение пользователю {user_id}. Код VK: {e.error_code}, Сообщение: {e.error_msg}")
+        except Exception as e:
+            print(f"[GENERAL ERROR] Ошибка отправки: {e}")
+
+    def ensure_user_data(self, user_id):
+        """Гарантирует, что у пользователя есть словарь для данных"""
+        if user_id not in self.user_data:
+            self.user_data[user_id] = {}
+        if user_id not in self.user_states:
+            self.user_states[user_id] = STATE_START
+
+    def handle_message(self, event):
+        user_id = event.user_id
+        # Защита: если текста нет, считаем это пустым вводом
+        text = (event.text or "").strip()
+
+        self.ensure_user_data(user_id)
+
+        # Обработка /start отдельно
+        if text == "/start":
+            self.user_states[user_id] = STATE_START
+            self.user_data[user_id] = {}
+            self.send_message(user_id, "Привет! Хотите записаться? Нажмите кнопку ниже или напишите «записаться».",
+                              keyboard=make_keyboard_start())
+            return
+
+        state = self.user_states.get(user_id, STATE_START)
+
+        if state == STATE_START:
+            if text.lower() in ["записаться", "хочу записаться", "записаться на услугу"]:
+                self.user_states[user_id] = STATE_NAME
+                self.send_message(user_id, "Отлично! Как вас зовут? Напишите имя.")
+            else:
+                self.send_message(user_id, "Нажмите «Записаться на услугу» или напишите «записаться», чтобы начать.", keyboard=make_keyboard_start())
+
+        elif state == STATE_NAME:
+            # ГЛАВНОЕ ИСПРАВЛЕНИЕ: проверяем, не пустой ли текст
+            if not text:
+                self.send_message(user_id, "Пожалуйста, напишите ваше имя, не оставляйте поле пустым.")
+                return
+
+            self.user_data[user_id]["name"] = text
+            self.user_states[user_id] = STATE_PHONE
+            self.send_message(user_id, "Напишите ваш номер телефона (можно в любом формате).")
+
+        elif state == STATE_PHONE:
+            if not text:
+                 self.send_message(user_id, "Пожалуйста, укажите номер телефона.")
+                 return
+            self.user_data[user_id]["phone"] = text
+            self.user_states[user_id] = STATE_SERVICE
+            self.send_message(user_id, "Какую услугу хотите? Выберите из списка:", keyboard=make_keyboard_services())
+
+        elif state == STATE_SERVICE:
+            service = text.capitalize() if text else "Другое"
+            if service not in ["Консультация", "Массаж", "Стрижка", "Маникюр", "Другое"]:
+                service = "Другое"
+            self.user_data[user_id]["service"] = service
+            self.user_states[user_id] = STATE_DATE
+            self.send_message(user_id, f"Вы выбрали: {service}. На какую дату и время хотите записаться? Напишите кратко, например: «15.10 в 14:00».")
+
+        elif state == STATE_DATE:
+            if not text:
+                self.send_message(user_id, "Укажите дату и время, пожалуйста.")
+                return
+            self.user_data[user_id]["date_time"] = text
+            save_lead(user_id, self.user_data[user_id])
+            self.user_states[user_id] = STATE_START
+            self.user_data[user_id] = {} # Сброс
+            self.send_message(
+                user_id,
+                "Спасибо! Ваша заявка принята. Мы свяжемся с вами для подтверждения.\n"
+                "Хотите записаться ещё раз? Нажмите «Записаться на услугу».",
+                keyboard=make_keyboard_start(),
+            )
+
+    def run(self):
+        longpoll = VkLongPoll(self.vk, group_id=self.group_id)
+        print(f"Бот запущен для группы ID: {self.group_id} …")
+        for event in longpoll.listen():
+            if event.type == VkEventType.MESSAGE_NEW and event.to_me:
+                try:
+                    self.handle_message(event)
+                except Exception as e:
+                    # Теперь здесь будет реальная ошибка, а не ID
+                    print(f"Глобальная ошибка обработки события: {type(e).__name__}: {e}")
+
+if __name__ == "__main__":
+    init_csv()
+    bot = LeadBot(VK_TOKEN)
+    bot.run()
+
